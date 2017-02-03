@@ -60,6 +60,7 @@ class Stream(PipelineElement):
 
         # transform frame with all elements
         for element in self.elements:
+            if frame is None: break
             frame = element.transform(frame)
 
         return frame
@@ -86,7 +87,9 @@ class Stream(PipelineElement):
                 return frame
 
         my_split = SplitSourceContext(self)
-        self.add(my_split.transformer())
+        split_transformer = my_split.transformer()
+        split_transformer.is_split_stream = True
+        self.add(split_transformer)
         result = Stream()
         result.source = stream_source(my_split.source, all_at_once=False, closer=my_split.closer)()
         return result
@@ -95,8 +98,10 @@ class Stream(PipelineElement):
         """Processes all frames the source is willing to give, meaning this method calls get_frame and feeds it to the
         sink until the source is closed.
         """
-        while(not self.is_closed()):
-            self.sink.process(self.get_frame())
+        while not self.is_closed():
+            frame = self.get_frame()
+            if frame is not None:
+                self.sink.process(frame)
 
 
 class SourceIsClosedException(Exception):
