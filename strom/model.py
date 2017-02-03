@@ -1,44 +1,55 @@
+import inspect
 from queue import Queue
-
-
-def blockly(name=None, type=None):
-    """Class attribute dectorator for supplying blockly generation metadata."""
-    def decorator(func):
-        func.blockly_type = type
-        func.blockly_name = name
-        func.is_blockly = True
-        return func
-
-    return decorator
+import functools
 
 
 class PipelineElement:
     """Pipeline elements are the objects which constitute a pipeline. Please see the documentation of strom.py for more
     details about this concept.
     """
+    def __init__(self, handler, args, kwargs):
+        self._handler = handler
+        self._handler_args = args
+        self._handler_kwargs = kwargs
 
-    @blockly(name='name', type='String')
-    def set_name(self, value):
-        self._name = value
+    def call_handler(self, *args):
+        # if the handler's first argument is called self, then chances are we've decorated a class method which expects
+        # the object instance as first parameter. Let's make sure it gets that one.
+        args_for_handler = []
+        handler_signature = inspect.signature(self._handler, follow_wrapped=False)
+        if 'self' in handler_signature.parameters:
+            args_head, *args_tail = self._handler_args
+            args_for_handler = [args_head] + list(args) + args_tail
+        else:
+            args_for_handler = args + self._handler_args
 
-    def __init__(self):
-        self._name = None
+        return self._handler(*args_for_handler, **self._handler_kwargs)
+
+    def __str__(self):
+        return super().__str__() if self._handler is None else self._handler.__name__
 
 
 class Stream(PipelineElement):
     """A stream collects, transports and transforms data maintained in frames.
     """
 
-    def __init__(self):
+    def __init__(self, name=None, source=None, sink=None):
         """Creates a new stream from a source
         """
-        self.source = None
+        self.name = name
+        self.source = source
+        self.sink = sink
         self.elements = []
+
+    def __str__(self):
+        if self.name is None:
+            return "Stream->%s" % str(self.source)
+        else:
+            return self.name
 
     def add(self, element):
         """Adds an element (transformer or gate) to the stream.
         """
-        element._set_stream(self)
         self.elements.append(element)
 
     def get_frame(self):
@@ -57,18 +68,69 @@ class Stream(PipelineElement):
         """Checks if the source can deliver any more frames."""
         return self.source.is_closed()
 
+    def split(self):
+        class SplitSourceContext:
+            def __init__(self, origin):
+                self.frames = Queue()
+                self._origin = origin
+
+            def closer(self):
+                return self._origin.is_closed() and self.frames.empty()
+
+            def source(self):
+                return self.frames.get_nowait()
+
+            @stream_transformer
+            def transformer(self, frame):
+                self.frames.put_nowait(frame)
+                return frame
+
+        my_split = SplitSourceContext(self)
+        self.add(my_split.transformer())
+        result = Stream()
+        result.source = stream_source(my_split.source, all_at_once=False, closer=my_split.closer)()
+        return result
+
+    def run(self):
+        """Processes all frames the source is willing to give, meaning this method calls get_frame and feeds it to the
+        sink until the source is closed.
+        """
+        while(not self.is_closed()):
+            self.sink.process(self.get_frame())
+
 
 class SourceIsClosedException(Exception):
     """Exception used to denote that a source can no longer deliver frames."""
     pass
 
+def stream_source(method=None, all_at_once=False, closer=None):
+    # If called without method, we've been called with optional arguments.
+    # We return a decorator with the optional arguments filled in.
+    # Next time round we'll be decorating method.
+    if method is None:
+        return functools.partial(stream_source, all_at_once=all_at_once, closer=closer)
+    @functools.wraps(method)
+    def f(*args, **kwargs):
+        return Source(method, args, kwargs, all_at_once, closer)
+    return f
 
 class Source(PipelineElement):
     """A source delivers frames into a stream."""
 
+    def __init__(self, handler, args, kwargs, all_at_once=False, closer=None):
+        super().__init__(handler, args, kwargs)
+        self.all_at_once = all_at_once
+        self.closer = closer
+        self._data = None
+        if not all_at_once and closer is None:
+            raise ValueError('Sources which are not all_at_once must have a closer')
+
     def is_closed(self):
         """Determines if this source can deliver any more frames. Once a source is closed, it must not re-open again."""
-        return False
+        if self.all_at_once:
+            return not(self._data is None or self._data)
+        else:
+            return self.closer()
 
     def get_frame(self):
         """Returns another frame. This method may block until the next frame becomes available. Calling this method on
@@ -77,28 +139,36 @@ class Source(PipelineElement):
         if self.is_closed():
             raise SourceIsClosedException()
 
-        return None
+        if self.all_at_once:
+            if self._data is None:
+                self._data = self.call_handler()
+            return self._data.pop()
+        else:
+            return self.call_handler()
+
+
+def stream_sink(method=None):
+    # If called without method, we've been called with optional arguments.
+    # We return a decorator with the optional arguments filled in.
+    # Next time round we'll be decorating method.
+    if method is None:
+        return functools.partial(stream_sink)
+    @functools.wraps(method)
+    def f(*args, **kwargs):
+        return Sink(method, args, kwargs)
+    return f
 
 
 class Sink(PipelineElement):
     """A sink draws from a stream and stores/displays the frames."""
 
-    def __init__(self):
-        self.stream = None
+    def __init__(self, handler, args, kwargs):
+        super().__init__(handler, args, kwargs)
 
-    def tick(self):
-        """Each call to this method processes a single frame. When this method returns False, no more calls to this method
-        are necessary (but still allowed).
-        """
-        if self.stream.is_closed():
-            return False
-        else:
-            self._process_frame(self.stream.get_frame())
-            return True
+    def process(self, frame):
+        """Each call to this method processes a single frame."""
+        self.call_handler(frame)
 
-    def _process_frame(self, frame):
-        """Subclasses should override this method to process the frames dripping out of the stream."""
-        raise NotImplementedError()
 
 
 class TransformerInUseException(Exception):
@@ -106,40 +176,56 @@ class TransformerInUseException(Exception):
     pass
 
 
+def stream_transformer(method=None):
+    # If called without method, we've been called with optional arguments.
+    # We return a decorator with the optional arguments filled in.
+    # Next time round we'll be decorating method.
+    if method is None:
+        return functools.partial(stream_source)
+    @functools.wraps(method)
+    def f(*args, **kwargs):
+        return Transformer(method, args, kwargs)
+    return f
+
 class Transformer(PipelineElement):
     """Transformer alter/modify/act on a frame within a stream."""
 
-    def __init__(self):
-        self._stream = None
-
-    def _set_stream(self, stream):
-        """Not intended for public consumption. This method is called internally when it is assigned to a stream."""
-        if self._stream is not None:
-            raise TransformerInUseException()
-        else:
-            self._stream = stream
+    def __init__(self, handler, args, kwargs):
+        super().__init__(handler, args, kwargs)
 
     def transform(self, frame):
-        raise NotImplementedError()
+        return self.call_handler(frame)
 
+
+def stream_gate(method=None, fatal=False):
+    # If called without method, we've been called with optional arguments.
+    # We return a decorator with the optional arguments filled in.
+    # Next time round we'll be decorating method.
+    if method is None:
+        return functools.partial(stream_gate, fatal=fatal)
+    @functools.wraps(method)
+    def f(*args, **kwargs):
+        return Gate(method, args, kwargs, fatal)
+    return f
 
 class Gate(Transformer):
     """Gates check frames for certain properties/qualities. A gate can be fatal, meaning that it brings the whole stream
-    down if a single frame fails to pass, non-fatal meaning that frames which don't pass are dropped, and divergent
-    meaning that frames which don't pass are put in another stream.
-
-    This class is not intended to be overiden directly. Rather override it's direct descendants FatalGate, NonFatalGate
-    and DivergentGate, depending on which behavior is desired.
+    down if a single frame fails to pass, or non-fatal meaning that frames which don't pass are dropped.
     """
 
-    def transform(self, frame):
-        raise NotImplementedError()
+    def __init__(self, handler, args, kwargs, fatal=False):
+        super().__init__(handler, args, kwargs)
+        self._is_fatal = fatal
 
-    def _check(self, frame):
-        """Subclasses should override this to perform checks on a frame. If the check fails, return a string with an
-        error message. If the check passes return None.
-        """
-        raise NotImplementedError()
+    def transform(self, frame):
+        frame_passes_gate = self.call_handler(frame)
+        if not frame_passes_gate:
+            if self._is_fatal:
+                raise GateFailedException("Frame %s did not pass gate %s" % (str(frame), str(self)))
+            else:
+                return None
+        else:
+            return frame
 
 
 class GateFailedException(Exception):
@@ -147,46 +233,4 @@ class GateFailedException(Exception):
 
     def __init__(self, message):
         super().__init__(message)
-
-
-class FatalGate(Gate):
-    def transform(self, frame):
-        result = self._check(frame)
-        if result is not None:
-            # TODO: add logging here
-            raise GateFailedException(result)
-
-        return frame
-
-
-class NonFatalGate(Gate):
-    def transform(self, frame):
-        result = self._check(frame)
-        if result is not None:
-            # TODO: add logging here
-            return None
-        else:
-            return frame
-
-
-class DivergentGate(Gate, Source):
-    def __init__(self):
-        self._frameQueue = Queue()
-
-    def transform(self, frame):
-        result = self._check(frame)
-        if result is not None:
-            # TODO: add logging here
-            self._frameQueue.put_nowait(frame)
-            return None
-        else:
-            return frame
-
-    def get_frame(self):
-        if self.is_closed():
-            raise SourceIsClosedException()
-        return self._frameQueue.get(True)
-
-    def is_closed(self):
-        return self._frameQueue.empty() and self._stream.is_closed()
 
