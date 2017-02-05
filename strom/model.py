@@ -92,6 +92,7 @@ class Stream(PipelineElement):
         self.add(split_transformer)
         result = Stream()
         result.source = stream_source(my_split.source, all_at_once=False, closer=my_split.closer)()
+        split_transformer.split_stream = result
         return result
 
     def run(self):
@@ -238,4 +239,31 @@ class GateFailedException(Exception):
 
     def __init__(self, message):
         super().__init__(message)
+
+
+def stream_barrier(method=None):
+    # If called without method, we've been called with optional arguments.
+    # We return a decorator with the optional arguments filled in.
+    # Next time round we'll be decorating method.
+    if method is None:
+        return functools.partial(stream_barrier)
+
+    @functools.wraps(method)
+    def f(*args, **kwargs):
+        return Barrier(method, args, kwargs)
+
+    return f
+
+
+class Barrier(PipelineElement):
+    """Barriers are the basic synchronization construct of strom. A barrier function gets a dictionary of queues, one
+    queue for each stream which ends at this barrier. The barrier function can then decide when to open/close the barrier
+    by returning True or False, or to modify the queues at will (e.g. drop frames from it). When the barrier is open, each
+    framing coming out of it will draw a single frame of each queue and assemble them in a dictionary."""
+
+    def __init__(self, handler, args, kwargs):
+        super().__init__(handler, args, {})
+        self._streams = kwargs
+        # TODO: register sinks with all streams in kwargs
+        # TODO: produce source which can be used to start a new stream
 

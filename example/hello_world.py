@@ -19,7 +19,11 @@ def print_sink(frame):
 stream = Stream()
 stream.source = range_source(20)
 stream.add(add_number(10))
-stream.add(is_even())
+
+even_stream = stream.split()
+even_stream.add(is_even())
+even_stream.sink = print_sink()
+
 stream.sink = print_sink()
 
 if __name__ == '__main__':
