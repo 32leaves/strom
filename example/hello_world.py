@@ -16,15 +16,23 @@ def is_even(frame):
 def print_sink(frame):
     print(frame)
 
-stream = Stream()
-stream.source = range_source(20)
-stream.add(add_number(10))
+@stream_barrier
+def pass_on_barrier(frames):
+    return True
 
-even_stream = stream.split()
+initial_stream = Stream()
+initial_stream.source = range_source(20)
+initial_stream.add(add_number(10))
+
+even_stream = initial_stream.split()
 even_stream.add(is_even())
-even_stream.sink = print_sink()
 
-stream.sink = print_sink()
+all_streams_barrier = pass_on_barrier(all_numbers=initial_stream, even_numbers=even_stream)
+result_stream = Stream()
+result_stream.source = all_streams_barrier
+result_stream.sink = print_sink()
+
+stream = result_stream
 
 if __name__ == '__main__':
     stream.run()

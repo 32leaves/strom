@@ -23,17 +23,16 @@ class StromCommandLine(object):
         # use dispatch pattern to invoke method with same name
         getattr(self, args.command)()
 
-    def railroad(self):
-        from strom.painter import RailroadDiagram
+    def graphviz(self):
+        from strom.painter import GraphvizDiagram
 
-        parser = argparse.ArgumentParser(description='Draws a railroad diagram for a stream')
+        parser = argparse.ArgumentParser(description='Draws a diagram for a stream')
         parser.add_argument('--module', help='The Python module which defines the stream', action='store')
         parser.add_argument('--save', help='The output filename', action='store_true')
         args = parser.parse_args(sys.argv[2:])
         module = __import__(args.module, fromlist=[1])
-        streams = inspect.getmembers(module, lambda x: isinstance(x, Stream))
-        for idx, stream in enumerate(streams):
-            print(RailroadDiagram(stream[1]).draw("output_%d.svg" % idx))
+        GraphvizDiagram(module.stream).draw("output_0.dot")
+
 
 if __name__ == '__main__':
     main()

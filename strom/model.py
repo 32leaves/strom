@@ -92,6 +92,7 @@ class Stream(PipelineElement):
         self.add(split_transformer)
         result = Stream()
         result.source = stream_source(my_split.source, all_at_once=False, closer=my_split.closer)()
+        result.source.is_split_source = True
         split_transformer.split_stream = result
         return result
 
@@ -109,6 +110,7 @@ class SourceIsClosedException(Exception):
     """Exception used to denote that a source can no longer deliver frames."""
     pass
 
+
 def stream_source(method=None, all_at_once=False, closer=None):
     # If called without method, we've been called with optional arguments.
     # We return a decorator with the optional arguments filled in.
@@ -119,6 +121,7 @@ def stream_source(method=None, all_at_once=False, closer=None):
     def f(*args, **kwargs):
         return Source(method, args, kwargs, all_at_once, closer)
     return f
+
 
 class Source(PipelineElement):
     """A source delivers frames into a stream."""
@@ -176,7 +179,6 @@ class Sink(PipelineElement):
         self.call_handler(frame)
 
 
-
 class TransformerInUseException(Exception):
     """Exception thrown by transformer instances when they are assigned to two streams."""
     pass
@@ -192,6 +194,7 @@ def stream_transformer(method=None):
     def f(*args, **kwargs):
         return Transformer(method, args, kwargs)
     return f
+
 
 class Transformer(PipelineElement):
     """Transformer alter/modify/act on a frame within a stream."""
@@ -213,6 +216,7 @@ def stream_gate(method=None, fatal=False):
     def f(*args, **kwargs):
         return Gate(method, args, kwargs, fatal)
     return f
+
 
 class Gate(Transformer):
     """Gates check frames for certain properties/qualities. A gate can be fatal, meaning that it brings the whole stream
@@ -255,15 +259,32 @@ def stream_barrier(method=None):
     return f
 
 
-class Barrier(PipelineElement):
+class Barrier(Source):
     """Barriers are the basic synchronization construct of strom. A barrier function gets a dictionary of queues, one
     queue for each stream which ends at this barrier. The barrier function can then decide when to open/close the barrier
     by returning True or False, or to modify the queues at will (e.g. drop frames from it). When the barrier is open, each
     framing coming out of it will draw a single frame of each queue and assemble them in a dictionary."""
 
     def __init__(self, handler, args, kwargs):
-        super().__init__(handler, args, {})
+        super().__init__(handler, args, {}, closer=lambda x: False)
         self._streams = kwargs
-        # TODO: register sinks with all streams in kwargs
+
+        # register sinks with all streams in kwargs
+        for name, stream in self._streams.items():
+            my_sink = stream_sink(lambda frame: self._queues[name].append(frame))
+            my_sink.is_barrier = True
+            stream.sink = my_sink
+
         # TODO: produce source which can be used to start a new stream
 
+    def get_streams(self):
+        """Returns a dictionary of streams registered at this barrier"""
+        return self._streams
+
+    def get_frame(self):
+        # TODO: implement me
+        pass
+
+    def is_closed(self):
+        # TODO: implement me
+        pass
