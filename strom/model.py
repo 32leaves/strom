@@ -151,7 +151,7 @@ class Source(PipelineElement):
         if self.all_at_once:
             if self._data is None:
                 self._data = self.call_handler()
-            return self._data.pop()
+            return self._data.pop(0)
         else:
             return self.call_handler()
 
@@ -268,23 +268,38 @@ class Barrier(Source):
     def __init__(self, handler, args, kwargs):
         super().__init__(handler, args, {}, closer=lambda x: False)
         self._streams = kwargs
+        self._queue = []
 
         # register sinks with all streams in kwargs
+        @stream_sink
+        def error_sink(frame):
+            raise Exception('Streams ending in a barrier must not be run')
+
         for name, stream in self._streams.items():
-            my_sink = stream_sink(lambda frame: self._queues[name].append(frame))
+            my_sink = error_sink()
             my_sink.is_barrier = True
             stream.sink = my_sink
-
-        # TODO: produce source which can be used to start a new stream
 
     def get_streams(self):
         """Returns a dictionary of streams registered at this barrier"""
         return self._streams
 
     def get_frame(self):
-        # TODO: implement me
-        pass
+        frame = self._query_frame_from_streams()
+        self._queue.append(frame)
+
+        if self._is_barrier_open():
+            return self._queue.pop(0)
+        else:
+            None
+
+    def _query_frame_from_streams(self):
+        """Calls get_frame on all registered open streams and assembles a dictionary from it"""
+        return {name: (None if stream.is_closed() else stream.get_frame()) for name, stream in self._streams.items()}
+
+    def _is_barrier_open(self):
+        return self.call_handler(self._queue)
 
     def is_closed(self):
-        # TODO: implement me
-        pass
+        # we are closed when all source streams are closed
+        return all([stream.is_closed() for _, stream in self._streams.items()])
