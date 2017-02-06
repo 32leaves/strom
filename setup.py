@@ -12,6 +12,6 @@ setup(name='strom',
       entry_points={
           'console_scripts': ['strom=strom.command_line:main'],
       },
-      install_requires=['pandas'])
+      install_requires=['pandas', 'svgwrite'])
 
 
